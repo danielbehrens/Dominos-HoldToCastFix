@@ -58,6 +58,7 @@ DominosHoldToCastFix.bindingsActive = false
 DominosHoldToCastFix.stateDriverActive = false
 DominosHoldToCastFix.bar1Paged = false
 DominosHoldToCastFix.bar1Page = 1
+DominosHoldToCastFix.zoneTimer = nil
 
 -- Debug event log (ring buffer, newest at end)
 local DEBUG_LOG_MAX = 40
@@ -275,16 +276,24 @@ function DominosHoldToCastFix:DisableStateDriver()
     end
 end
 
--- Re-register form paging events on Blizzard's ActionBarController.
+-- Re-register action bar events on Blizzard's ActionBarController.
 -- Dominos may disable some ActionBarController events; re-registering
 -- ensures the engine-side action bar page updates correctly for
--- Druid forms (etc.), making ACTIONBUTTON bindings fire the right slot.
-local function EnableBlizzardFormPaging()
+-- Druid forms, override bar transitions (entering a dungeon while flying), etc.
+-- Without them, ACTIONBUTTON bindings fire the wrong slot.
+--
+-- IMPORTANT: Event registration does NOT taint ActionBarController's handler.
+-- When these events fire, ActionBarController's OnEvent runs in Blizzard's
+-- secure context (dispatched by the engine), so it can safely call protected
+-- functions like ChangeActionBarPage().  We must NEVER call those functions
+-- directly from our addon code — that causes ADDON_ACTION_BLOCKED.
+local function EnableBlizzardBarEvents()
     local controller = _G.ActionBarController
     if not controller then return end
     controller:RegisterEvent("UPDATE_BONUS_ACTIONBAR")
     controller:RegisterEvent("UPDATE_SHAPESHIFT_FORM")
-    DebugLog("EnableBlizzardFormPaging: registered events on ActionBarController")
+    controller:RegisterEvent("UPDATE_OVERRIDE_ACTIONBAR")
+    DebugLog("EnableBlizzardBarEvents: registered on ActionBarController")
 end
 
 function DominosHoldToCastFix:Initialize()
@@ -320,7 +329,7 @@ function DominosHoldToCastFix:Initialize()
     end
 
     -- Let Blizzard's ActionBarController handle engine-side form paging
-    EnableBlizzardFormPaging()
+    EnableBlizzardBarEvents()
 
     if ns.InitMinimapButton then
         ns.InitMinimapButton()
@@ -341,8 +350,19 @@ DominosHoldToCastFix:SetScript("OnEvent", function(self, event)
     elseif event == "PLAYER_ENTERING_WORLD" then
         if self.initialized then
             DebugLog("PLAYER_ENTERING_WORLD: re-applying bindings")
-            EnableBlizzardFormPaging()
+            EnableBlizzardBarEvents()
             self:ApplyBindings()
+            -- Safety-net: re-apply after a short delay to handle late
+            -- bar transitions (e.g. Skyriding dismount during loading
+            -- screen where engine page update events may be lost).
+            if self.zoneTimer then self.zoneTimer:Cancel() end
+            self.zoneTimer = C_Timer.NewTimer(1, function()
+                self.zoneTimer = nil
+                if not self.initialized then return end
+                DebugLog("ZoneTimer: delayed re-apply")
+                EnableBlizzardBarEvents()
+                self:ApplyBindings()
+            end)
         end
     elseif event == "PLAYER_REGEN_ENABLED" then
         DebugLog("REGEN_ENABLED: pending=" .. tostring(self.pendingUpdate))
